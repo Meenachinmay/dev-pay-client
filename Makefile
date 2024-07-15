@@ -1,3 +1,3 @@
 run:
 	@echo "Running app..."
-	go run cmd/*.go
+	cd cmd && go run *.go
