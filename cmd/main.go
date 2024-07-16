@@ -7,60 +7,65 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"log"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 var action, username, password string
 var newsletter bool
-var REQUEST_COUNT uint64 = 1000000
+
+const (
+	REQUEST_COUNT = 1000000
+	CONCURRENCY   = 100
+	BATCH_SIZE    = 1000
+)
 
 func main() {
 	configData, err := os.ReadFile("grpc_config.json")
 	if err != nil {
-		log.Fatal("failed to read gRPC config file: %v", err)
+		log.Fatalf("failed to read gRPC config file: %v", err)
 	}
 
-	//
-	conn, err := grpc.NewClient(
+	conn, err := grpc.Dial(
 		"localhost:50051",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultServiceConfig(string(configData)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(100*1024*1024)), // 100MB
+		grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(100*1024*1024)), // 100MB
 	)
 	if err != nil {
-		log.Fatalf("failed to create gRPC client, failed to connect gRPC server: %v", err)
-	} else {
-		log.Println("Connected to gRPC server")
+		log.Fatalf("failed to connect to gRPC server: %v", err)
 	}
 	defer conn.Close()
 
+	log.Println("Connected to gRPC server")
+
 	client := payments.NewCreateAccountServiceClient(conn)
 
-	// simulate
 	var successCount, failCount int64
 	startTime := time.Now()
-	for i := uint64(1); i <= REQUEST_COUNT; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-		defer cancel()
 
-		account := &payments.Account{
-			Id:     i,
-			Ledger: 1,
-			Code:   1,
-		}
+	// Create a channel to distribute work
+	jobs := make(chan uint64, REQUEST_COUNT)
 
-		req := &payments.CreateAccountRequest{Account: account}
-		resp, err := client.CreateAccount(ctx, req)
-		if err != nil {
-			log.Printf("Failed to create account ID %d: %v", i, err)
-			atomic.AddInt64(&failCount, 1)
-			continue
-		} else {
-			atomic.AddInt64(&successCount, 1)
-		}
+	// Create a wait group to wait for all goroutines to finish
+	var wg sync.WaitGroup
 
-		log.Printf("Created account ID %d, response: %s", i, resp.Results)
+	// Start worker goroutines
+	for i := 0; i < CONCURRENCY; i++ {
+		wg.Add(1)
+		go worker(client, jobs, &successCount, &failCount, &wg)
 	}
+
+	// Send jobs to the channel
+	for i := uint64(1); i <= REQUEST_COUNT; i++ {
+		jobs <- i
+	}
+	close(jobs)
+
+	// Wait for all workers to finish
+	wg.Wait()
 
 	totalTime := time.Since(startTime)
 	totalSeconds := totalTime.Seconds()
@@ -176,4 +181,31 @@ func main() {
 	//	}
 	//}
 
+}
+
+func worker(client payments.CreateAccountServiceClient, jobs <-chan uint64, successCount, failCount *int64, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for id := range jobs {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+
+		account := &payments.Account{
+			Id:     id,
+			Ledger: 1,
+			Code:   1,
+		}
+
+		req := &payments.CreateAccountRequest{Account: account}
+		resp, err := client.CreateAccount(ctx, req)
+
+		cancel()
+
+		if err != nil {
+			log.Printf("Failed to create account ID %d: %v", id, err)
+			atomic.AddInt64(failCount, 1)
+		} else {
+			atomic.AddInt64(successCount, 1)
+			log.Printf("Created account ID %d, response: %s", id, resp.Results)
+		}
+	}
 }
