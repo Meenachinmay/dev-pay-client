@@ -13,7 +13,7 @@ import (
 
 var action, username, password string
 var newsletter bool
-var REQUEST_COUNT uint64 = 100000
+var REQUEST_COUNT uint64 = 1000000
 
 func main() {
 	configData, err := os.ReadFile("grpc_config.json")
