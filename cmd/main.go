@@ -13,6 +13,7 @@ import (
 
 var action, username, password string
 var newsletter bool
+var REQUEST_COUNT uint64 = 100000
 
 func main() {
 	configData, err := os.ReadFile("grpc_config.json")
@@ -38,7 +39,7 @@ func main() {
 	// simulate
 	var successCount, failCount int64
 	startTime := time.Now()
-	for i := uint64(1); i <= 500000; i++ {
+	for i := uint64(1); i <= REQUEST_COUNT; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 		defer cancel()
 
@@ -65,7 +66,7 @@ func main() {
 	totalSeconds := totalTime.Seconds()
 	successPerSecond := float64(successCount) / totalSeconds
 
-	log.Printf("Total requests: %d, Successful: %d, Failed: %d", 1000, successCount, failCount)
+	log.Printf("Total requests: %d, Successful: %d, Failed: %d", REQUEST_COUNT, successCount, failCount)
 	log.Printf("Total time taken: %.2f seconds", totalSeconds)
 	log.Printf("Successful requests per second: %.2f", successPerSecond)
 
