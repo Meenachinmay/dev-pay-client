@@ -18,7 +18,7 @@ var newsletter bool
 const (
 	REQUEST_COUNT = 1000000
 	CONCURRENCY   = 100
-	BATCH_SIZE    = 1000
+	BATCH_SIZE    = 100
 )
 
 func main() {
@@ -42,12 +42,13 @@ func main() {
 	log.Println("Connected to gRPC server")
 
 	client := payments.NewCreateAccountServiceClient(conn)
+	_ = payments.NewTransactionsLookUpServiceClient(conn)
 
 	var successCount, failCount int64
 	startTime := time.Now()
 
 	// Create a channel to distribute work
-	jobs := make(chan uint64, REQUEST_COUNT)
+	jobs := make(chan []uint64, REQUEST_COUNT/BATCH_SIZE)
 
 	// Create a wait group to wait for all goroutines to finish
 	var wg sync.WaitGroup
@@ -58,9 +59,13 @@ func main() {
 		go worker(client, jobs, &successCount, &failCount, &wg)
 	}
 
-	// Send jobs to the channel
-	for i := uint64(1); i <= REQUEST_COUNT; i++ {
-		jobs <- i
+	// Send jobs to the channel in batches
+	for i := uint64(1); i <= REQUEST_COUNT; i += BATCH_SIZE {
+		end := i + BATCH_SIZE
+		if end > REQUEST_COUNT {
+			end = REQUEST_COUNT + 1
+		}
+		jobs <- createRange(i, end)
 	}
 	close(jobs)
 
@@ -74,6 +79,10 @@ func main() {
 	log.Printf("Total requests: %d, Successful: %d, Failed: %d", REQUEST_COUNT, successCount, failCount)
 	log.Printf("Total time taken: %.2f seconds", totalSeconds)
 	log.Printf("Successful requests per second: %.2f", successPerSecond)
+
+	log.Printf("loading all the records to verify the transaction...\n")
+	time.Sleep(3 * time.Second)
+	//verifyAccounts(client2, 1, REQUEST_COUNT)
 
 	//// Initial selection for action
 	//initialForm := huh.NewForm(
@@ -183,29 +192,57 @@ func main() {
 
 }
 
-func worker(client payments.CreateAccountServiceClient, jobs <-chan uint64, successCount, failCount *int64, wg *sync.WaitGroup) {
+func createRange(start, end uint64) []uint64 {
+	r := make([]uint64, end-start)
+	for i := range r {
+		r[i] = start + uint64(i)
+	}
+	return r
+}
+
+func worker(client payments.CreateAccountServiceClient, jobs <-chan []uint64, successCount, failCount *int64, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	for id := range jobs {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	for batch := range jobs {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
 
-		account := &payments.Account{
-			Id:     id,
-			Ledger: 1,
-			Code:   1,
+		accounts := make([]*payments.Account, len(batch))
+		for i, id := range batch {
+			accounts[i] = &payments.Account{
+				Id:     id,
+				Ledger: 1,
+				Code:   1,
+			}
 		}
 
-		req := &payments.CreateAccountRequest{Account: account}
-		resp, err := client.CreateAccount(ctx, req)
+		req := &payments.CreateAccountBatchRequest{Accounts: accounts}
+		_, err := client.CreateAccountBatch(ctx, req)
 
 		cancel()
 
 		if err != nil {
-			log.Printf("Failed to create account ID %d: %v", id, err)
-			atomic.AddInt64(failCount, 1)
+			log.Printf("Failed to create batch of accounts: %v", err)
+			atomic.AddInt64(failCount, int64(len(batch)))
 		} else {
-			atomic.AddInt64(successCount, 1)
-			log.Printf("Created account ID %d, response: %s", id, resp.Results)
+			atomic.AddInt64(successCount, int64(len(batch)))
+			log.Printf("Created batch of %d accounts", len(batch))
 		}
 	}
+}
+
+func verifyAccounts(client payments.TransactionsLookUpServiceClient, start, end uint64) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	req := &payments.LookupAccountsRequest{
+		AccountIds: createRange(start, end),
+	}
+
+	resp, err := client.LookupAccounts(ctx, req)
+	if err != nil {
+		log.Printf("Failed to lookup accounts: %v", err)
+		return
+	}
+
+	log.Printf("Verified %d accounts out of %d requested", len(resp.Accounts), end-start)
 }
